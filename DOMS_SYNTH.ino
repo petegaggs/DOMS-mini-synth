@@ -39,11 +39,14 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define SPI_CS_PIN 7
 #define LFO_PWM_PIN 9
 #define ENV_PWM_PIN 10
+#define NOISE_PIN 4
 #define DAC_SCALE_PER_SEMITONE 42
 #define MIDI_BASE_NOTE 12 //C0
 
 uint8_t currentMidiNote; //the note currently being played
 uint8_t keysPressedArray[128] = {0}; //to keep track of which keys are pressed
+
+uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
 void setup() {
   //MIDI stuff
@@ -60,10 +63,32 @@ void setup() {
   digitalWrite(LFO_PWM_PIN, LOW);
   pinMode(ENV_PWM_PIN, OUTPUT);
   digitalWrite(ENV_PWM_PIN, HIGH);
+  // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
+  TCCR1A = _BV(COM1A1) | _BV(COM1B1)| _BV(WGM10);
+  TCCR1B = _BV(CS10);
+  // timer 1 interrupt
+  TIMSK1 = _BV(TOIE1);
+  pinMode(NOISE_PIN, OUTPUT);
 }
 
 void loop() {
   MIDI.read();
+}
+
+SIGNAL(TIMER1_OVF_vect) {
+  // timer ISR
+  // handle noise signal. Set or clear noise pin PD4 (digital pin 4)
+  unsigned lsb = lfsr & 1;
+  if (lsb) {
+    PORTD |= 0x10;
+  } else {
+    PORTD &= ~0x10;
+  }
+  // advance LFSR
+  lfsr >>= 1;
+  if (lsb) {
+    lfsr ^= 0xA3000000u;
+  }
 }
 
 void handleNoteOn(uint8_t channel, uint8_t pitch, uint8_t velocity) { 
