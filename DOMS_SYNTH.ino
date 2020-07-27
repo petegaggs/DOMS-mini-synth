@@ -40,13 +40,32 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define LFO_PWM_PIN 9
 #define ENV_PWM_PIN 10
 #define NOISE_PIN 4
+#define LFO_WAVE_PIN A0
+#define LFO_FREQ_PIN A1
 #define DAC_SCALE_PER_SEMITONE 42
 #define MIDI_BASE_NOTE 12 //C0
+
+//timer stuff
+#define LFO_PWM OCR1A
+#define ENV_PWM OCR1B
 
 uint8_t currentMidiNote; //the note currently being played
 uint8_t keysPressedArray[128] = {0}; //to keep track of which keys are pressed
 
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
+
+// LFO stuff
+bool lfoReset = false;
+uint32_t lfoPhaccu;   // phase accumulator
+uint32_t lfoTword_m;  // dds tuning word m
+uint8_t lfoCnt;       // top 8 bits of accum is index into table
+enum lfoWaveTypes {
+  RAMP,
+  SAW,
+  TRI,
+  SQR
+};
+lfoWaveTypes lfoWaveform;
 
 void setup() {
   //MIDI stuff
@@ -60,7 +79,7 @@ void setup() {
   setNotePitch(60); //middle C for test
   //set env high and LFO low for now
   pinMode(LFO_PWM_PIN, OUTPUT);
-  digitalWrite(LFO_PWM_PIN, LOW);
+  digitalWrite(LFO_PWM_PIN, HIGH);
   pinMode(ENV_PWM_PIN, OUTPUT);
   digitalWrite(ENV_PWM_PIN, HIGH);
   // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
@@ -69,10 +88,12 @@ void setup() {
   // timer 1 interrupt
   TIMSK1 = _BV(TOIE1);
   pinMode(NOISE_PIN, OUTPUT);
+  ENV_PWM = 0xFF;
 }
 
 void loop() {
   MIDI.read();
+  getLfoParams();
 }
 
 SIGNAL(TIMER1_OVF_vect) {
@@ -89,6 +110,38 @@ SIGNAL(TIMER1_OVF_vect) {
   if (lsb) {
     lfsr ^= 0xA3000000u;
   }
+  // handle LFO DDS
+  if (lfoReset) {
+    lfoPhaccu = 0; // reset the lfo
+    lfoReset = false;
+  } else {
+    lfoPhaccu += lfoTword_m; // increment phase accumulator  
+  }
+  lfoCnt = lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
+  switch (lfoWaveform) {
+    case RAMP:
+      LFO_PWM = lfoCnt;
+      break;
+    case SAW:
+      LFO_PWM = 255 - lfoCnt;
+      break;
+    case TRI:
+      if (lfoCnt & 0x80) {
+        LFO_PWM = 254 - ((lfoCnt & 0x7F) << 1); //ramp down
+      } else {
+        LFO_PWM = lfoCnt << 1; //ramp up
+      }
+      break;
+    case SQR:
+      if (lfoCnt & 0x80) {
+        LFO_PWM = 255;
+      } else {
+        LFO_PWM = 0;
+      }
+      break;
+    default:
+      break;
+  }  
 }
 
 void handleNoteOn(uint8_t channel, uint8_t pitch, uint8_t velocity) { 
@@ -152,4 +205,21 @@ void dacWrite(uint16_t value) {
   SPI.transfer(0x90 | ((value >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
   SPI.transfer(value & 0xFF); //bits 0..7 of 12 bit value
   digitalWrite(SPI_CS_PIN,HIGH);
+}
+
+void getLfoParams() {
+  // read ADC to calculate the required DDS tuning word, log scale between 0.01Hz and 10Hz approx
+  float lfoControlVoltage = float(analogRead(LFO_FREQ_PIN)) * float(10)/float(1024); //gives 10 octaves range 0.01Hz to 10Hz
+  lfoTword_m = float(1369) * pow(2.0, lfoControlVoltage); //1369 sets the lowest frequency to 0.01Hz
+  // read ADC to get the LFO wave type
+  int adcVal = analogRead(LFO_WAVE_PIN);
+  if (adcVal < 256) {
+    lfoWaveform = RAMP;
+  } else if (adcVal < 512) {
+    lfoWaveform = SAW;
+  } else if (adcVal < 768) {
+    lfoWaveform = TRI;
+  } else {
+    lfoWaveform = SQR;
+  }
 }
