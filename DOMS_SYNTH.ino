@@ -53,9 +53,14 @@ uint8_t currentMidiNote; //the note currently being played
 uint8_t keysPressedArray[128] = {0}; //to keep track of which keys are pressed
 
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
+uint8_t ditherByte; // random dither
+uint8_t lfoPwmFrac; // fractional part of pwm
+uint8_t lfoPwmSet; // whole part of pwm
+bool triPhase = true; // rising or falling phase for triangle wave
 
 // LFO stuff
 bool lfoReset = false;
+uint8_t lastLfoCnt = 0;
 uint32_t lfoPhaccu;   // phase accumulator
 uint32_t lfoTword_m;  // dds tuning word m
 uint8_t lfoCnt;       // top 8 bits of accum is index into table
@@ -110,6 +115,7 @@ SIGNAL(TIMER1_OVF_vect) {
   if (lsb) {
     lfsr ^= 0xA3000000u;
   }
+  ditherByte = lfsr & 0xFF; // random dither for env and lfo
   // handle LFO DDS
   if (lfoReset) {
     lfoPhaccu = 0; // reset the lfo
@@ -117,31 +123,55 @@ SIGNAL(TIMER1_OVF_vect) {
   } else {
     lfoPhaccu += lfoTword_m; // increment phase accumulator  
   }
+  lfoPwmFrac = (lfoPhaccu >> 16) & 0xFF; // fractional part of 16 bit value
   lfoCnt = lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
     case RAMP:
-      LFO_PWM = lfoCnt;
+      lfoPwmSet = lfoCnt; // whole part
+      if ((lfoPwmFrac > ditherByte) && (lfoPwmSet < 255)) {
+        lfoPwmSet += 1;
+      }
+      LFO_PWM = lfoPwmSet;
       break;
     case SAW:
-      LFO_PWM = 255 - lfoCnt;
+      lfoPwmSet = 255 - lfoCnt; // whole part
+      // note dither is done in reverse for this waveform
+      if ((lfoPwmFrac > ditherByte) && (lfoPwmSet > 0)) {
+        lfoPwmSet -= 1;
+      }
+      LFO_PWM = lfoPwmSet;
       break;
     case TRI:
-      if (lfoCnt & 0x80) {
-        LFO_PWM = 254 - ((lfoCnt & 0x7F) << 1); //ramp down
+      if (lfoCnt < lastLfoCnt) {
+        triPhase = not(triPhase); // reverse direction
+      }
+      if (triPhase) {
+        // rising (same as ramp)
+        lfoPwmSet = lfoCnt; // whole part
+        if ((lfoPwmFrac > ditherByte) && (lfoPwmSet < 255)) {
+          lfoPwmSet += 1;
+        }     
       } else {
-        LFO_PWM = lfoCnt << 1; //ramp up
+        // falling (same as saw)
+        lfoPwmSet = 255 - lfoCnt; // whole part
+        // note dither is done in reverse for this waveform
+        if ((lfoPwmFrac > ditherByte) && (lfoPwmSet > 0)) {
+          lfoPwmSet -= 1;
+        }
       }
       break;
     case SQR:
       if (lfoCnt & 0x80) {
-        LFO_PWM = 255;
+        lfoPwmSet = 255;
       } else {
-        LFO_PWM = 0;
+        lfoPwmSet = 0;
       }
       break;
     default:
       break;
   }  
+  LFO_PWM = lfoPwmSet;
+  lastLfoCnt = lfoCnt;
 }
 
 void handleNoteOn(uint8_t channel, uint8_t pitch, uint8_t velocity) { 
