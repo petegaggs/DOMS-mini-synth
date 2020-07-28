@@ -4,7 +4,7 @@
  * Arduino Controlled
  * AS3394E IC main voice
  * AS3340 2nd oscillator
- * Work in progress, not finished
+ * LFO and envelope implemented with PWM
  * 
  * MIT License
  * Copyright (c) 2019 petegaggs
@@ -42,6 +42,9 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define NOISE_PIN 4
 #define LFO_WAVE_PIN A0
 #define LFO_FREQ_PIN A1
+#define ENV_ATTACK_PIN A2
+#define ENV_RELEASE_PIN A3
+#define TEST_PIN 8 //PB0 test interrupt timing
 #define DAC_SCALE_PER_SEMITONE 42
 #define MIDI_BASE_NOTE 12 //C0
 
@@ -72,6 +75,21 @@ enum lfoWaveTypes {
 };
 lfoWaveTypes lfoWaveform;
 
+// envelope stuff
+uint32_t envPhaccu;   // phase accumulator
+uint32_t envAttackTword;  // dds tuning word attack stage
+uint32_t envReleaseTword;  // dds tuning word release stage
+
+uint8_t envCnt;
+uint8_t lastEnvCnt;
+enum envStates {
+  WAIT,
+  ATTACK,
+  SUSTAIN,
+  RELEASE
+};
+envStates envState;
+
 void setup() {
   //MIDI stuff
   MIDI.begin(MIDI_CHANNEL_OMNI);      
@@ -93,16 +111,20 @@ void setup() {
   // timer 1 interrupt
   TIMSK1 = _BV(TOIE1);
   pinMode(NOISE_PIN, OUTPUT);
-  ENV_PWM = 0xFF;
+  envState = WAIT;
+  pinMode(TEST_PIN, OUTPUT);
 }
 
 void loop() {
   MIDI.read();
   getLfoParams();
+  getEnvParams();
 }
 
 SIGNAL(TIMER1_OVF_vect) {
   // timer ISR
+  // set PB0 high to measure timing
+  PORTB |= 0x01;
   // handle noise signal. Set or clear noise pin PD4 (digital pin 4)
   unsigned lsb = lfsr & 1;
   if (lsb) {
@@ -172,6 +194,43 @@ SIGNAL(TIMER1_OVF_vect) {
   }  
   LFO_PWM = lfoPwmSet;
   lastLfoCnt = lfoCnt;
+  // handle Envelope DDS - note this design uses linear envelope, not exponential
+  switch (envState) {
+    case WAIT:
+      envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      ENV_PWM = 0;
+      break;
+    case ATTACK:
+      envPhaccu += envAttackTword; // increment phase accumulator
+      envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
+      if (envCnt < lastEnvCnt) {
+        envState = SUSTAIN; // end of attack stage when counter wraps
+      } else {
+        ENV_PWM = envCnt;
+        lastEnvCnt = envCnt;
+      }
+      break;
+    case SUSTAIN:
+      envPhaccu = 0xFFFFFFFF; // clear the accumulator
+      lastEnvCnt = 0xFF;
+      ENV_PWM = 255;
+      break;
+    case RELEASE:
+      envPhaccu -= envReleaseTword; // decrement phase accumulator
+      envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
+      if (envCnt > lastEnvCnt) {
+        envState = WAIT; // end of release stage when counter wraps
+      } else {
+        ENV_PWM = envCnt;
+        lastEnvCnt = envCnt;
+      }
+      break;
+    default:
+      break;
+  }
+  // clear PB0 to measure timing
+  PORTB &= ~0x01;
 }
 
 void handleNoteOn(uint8_t channel, uint8_t pitch, uint8_t velocity) { 
@@ -213,9 +272,11 @@ void synthNoteOn(uint8_t note) {
   //starts playback of a note
   setNotePitch(note); //set the oscillator pitch
   currentMidiNote = note; //store the current note
+  envState = ATTACK;
 }
 
 void synthNoteOff(void) {
+  envState = RELEASE;
 }
 
 void setNotePitch(uint8_t note) {
@@ -252,4 +313,13 @@ void getLfoParams() {
   } else {
     lfoWaveform = SQR;
   }
+}
+
+void getEnvParams() {
+  float envControlVoltage;
+  // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
+  envControlVoltage = (1023 - analogRead(ENV_ATTACK_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
+  envAttackTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+  envControlVoltage = (1023 - analogRead(ENV_RELEASE_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
+  envReleaseTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
 }
