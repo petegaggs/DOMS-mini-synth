@@ -71,9 +71,18 @@ enum lfoWaveTypes {
   RAMP,
   SAW,
   TRI,
-  SQR
+  SQR,
+  ENV_UP, // sweep up following note on, then stop
+  ENV_DOWN, // sweep down following note on, then stop
+  SAMPLE_AND_HOLD
 };
 lfoWaveTypes lfoWaveform;
+
+enum filterEnvStates {
+  SWEEP,
+  HOLD
+};
+filterEnvStates filterEnvState;
 
 // envelope stuff
 uint32_t envPhaccu;   // phase accumulator
@@ -113,6 +122,7 @@ void setup() {
   pinMode(NOISE_PIN, OUTPUT);
   envState = WAIT;
   pinMode(TEST_PIN, OUTPUT);
+  //synthNoteOn(60); // for test
 }
 
 void loop() {
@@ -141,7 +151,9 @@ SIGNAL(TIMER1_OVF_vect) {
   // handle LFO DDS
   if (lfoReset) {
     lfoPhaccu = 0; // reset the lfo
+    lastLfoCnt = 0;
     lfoReset = false;
+    filterEnvState = SWEEP; // start sweep
   } else {
     lfoPhaccu += lfoTword_m; // increment phase accumulator  
   }
@@ -153,7 +165,19 @@ SIGNAL(TIMER1_OVF_vect) {
       if ((lfoPwmFrac > ditherByte) && (lfoPwmSet < 255)) {
         lfoPwmSet += 1;
       }
-      LFO_PWM = lfoPwmSet;
+      break;
+    case ENV_UP:
+      if (lfoCnt < lastLfoCnt) {
+        filterEnvState = HOLD; // end sweep
+      }
+      if (filterEnvState == SWEEP) {
+        lfoPwmSet = lfoCnt; // whole part
+        if ((lfoPwmFrac > ditherByte) && (lfoPwmSet < 255)) {
+          lfoPwmSet += 1;
+        }
+      } else {
+        lfoPwmSet = 255; // HOLD
+      }
       break;
     case SAW:
       lfoPwmSet = 255 - lfoCnt; // whole part
@@ -161,7 +185,20 @@ SIGNAL(TIMER1_OVF_vect) {
       if ((lfoPwmFrac > ditherByte) && (lfoPwmSet > 0)) {
         lfoPwmSet -= 1;
       }
-      LFO_PWM = lfoPwmSet;
+      break;
+    case ENV_DOWN:
+      if (lfoCnt < lastLfoCnt) {
+        filterEnvState = HOLD; // end sweep
+      }
+      if (filterEnvState == SWEEP) {
+        lfoPwmSet = 255 - lfoCnt; // whole part
+        // note dither is done in reverse for this waveform
+        if ((lfoPwmFrac > ditherByte) && (lfoPwmSet > 0)) {
+          lfoPwmSet -= 1;
+        }
+      } else {
+          lfoPwmSet = 0; // HOLD
+        }
       break;
     case TRI:
       if (lfoCnt < lastLfoCnt) {
@@ -187,6 +224,11 @@ SIGNAL(TIMER1_OVF_vect) {
         lfoPwmSet = 255;
       } else {
         lfoPwmSet = 0;
+      }
+      break;
+    case SAMPLE_AND_HOLD:
+      if (lfoCnt < lastLfoCnt) {
+        lfoPwmSet = ditherByte; // random
       }
       break;
     default:
@@ -273,6 +315,9 @@ void synthNoteOn(uint8_t note) {
   setNotePitch(note); //set the oscillator pitch
   currentMidiNote = note; //store the current note
   envState = ATTACK;
+  if ((lfoWaveform == ENV_UP) || (lfoWaveform == ENV_DOWN)) {
+    lfoReset = true;
+  }
 }
 
 void synthNoteOff(void) {
@@ -300,18 +345,42 @@ void dacWrite(uint16_t value) {
 
 void getLfoParams() {
   // read ADC to calculate the required DDS tuning word, log scale between 0.01Hz and 10Hz approx
-  float lfoControlVoltage = float(analogRead(LFO_FREQ_PIN)) * float(10)/float(1024); //gives 10 octaves range 0.01Hz to 10Hz
-  lfoTword_m = float(1369) * pow(2.0, lfoControlVoltage); //1369 sets the lowest frequency to 0.01Hz
-  // read ADC to get the LFO wave type
-  int adcVal = analogRead(LFO_WAVE_PIN);
-  if (adcVal < 256) {
-    lfoWaveform = RAMP;
-  } else if (adcVal < 512) {
-    lfoWaveform = SAW;
-  } else if (adcVal < 768) {
-    lfoWaveform = TRI;
+  uint32_t tempVal = analogRead(LFO_FREQ_PIN);
+  if (lfoWaveform == TRI) {
+    lfoTword_m = (tempVal << 11) + 687; // gives about 0.01 - 8Hz range
   } else {
-    lfoWaveform = SQR;
+    lfoTword_m = (tempVal << 10) + 1374; // gives about 0.01 - 8Hz range    
+  }
+  // read ADC to get the LFO wave type
+  int waveType = analogRead(LFO_WAVE_PIN) >> 7;
+  switch (waveType) {
+    case 0:
+      lfoWaveform = RAMP;
+      break;
+    case 1:
+      lfoWaveform = SAW;
+      break;
+    case 2:
+      lfoWaveform = TRI;
+      break;
+    case 3:
+      lfoWaveform = SQR;
+      break;
+    case 4:
+      lfoWaveform = ENV_UP;
+      break;
+    case 5:
+      lfoWaveform = ENV_DOWN;
+      break;
+    case 6:
+      lfoWaveform = SAMPLE_AND_HOLD;
+      break;
+    case 7:
+      lfoWaveform = SQR; // reserved
+      break;
+    default:
+      lfoWaveform = RAMP;
+      break;    
   }
 }
 
