@@ -237,10 +237,12 @@ SIGNAL(TIMER1_OVF_vect) {
   LFO_PWM = lfoPwmSet;
   lastLfoCnt = lfoCnt;
   // handle Envelope DDS - note this design uses linear envelope, not exponential
+  // AS3394 has a strange VCA, nothing happens at first.
+  // starting at 0x40000000 and ramping up gives a resonable response
   switch (envState) {
     case WAIT:
-      envPhaccu = 0; // clear the accumulator
-      lastEnvCnt = 0;
+      envPhaccu = 0x40000000; // start part-way
+      lastEnvCnt = 0x40;
       ENV_PWM = 0;
       break;
     case ATTACK:
@@ -261,7 +263,7 @@ SIGNAL(TIMER1_OVF_vect) {
     case RELEASE:
       envPhaccu -= envReleaseTword; // decrement phase accumulator
       envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
-      if (envCnt > lastEnvCnt) {
+      if ((envCnt > lastEnvCnt) || (envCnt < 0x40)) {
         envState = WAIT; // end of release stage when counter wraps
       } else {
         ENV_PWM = envCnt;
@@ -388,7 +390,7 @@ void getEnvParams() {
   float envControlVoltage;
   // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
   envControlVoltage = (1023 - analogRead(ENV_ATTACK_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
-  envAttackTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+  envAttackTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s  
   envControlVoltage = (1023 - analogRead(ENV_RELEASE_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
   envReleaseTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
 }
