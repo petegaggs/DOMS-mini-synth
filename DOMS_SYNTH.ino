@@ -52,6 +52,28 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define LFO_PWM OCR1A
 #define ENV_PWM OCR1B
 
+// exponential table for envelope attack phase only. starts with offset of 64 as nothing much happens below that
+const uint8_t expTable[] PROGMEM = {
+64,66,69,71,73,75,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,111,113,115,117,119,120,122,124,125,127,
+128,130,132,133,135,136,138,139,141,142,144,145,146,148,149,150,152,153,154,156,157,158,159,161,162,163,164,165,
+167,168,169,170,171,172,173,174,175,177,178,179,180,181,182,183,183,184,185,186,187,188,189,190,191,192,192,193,
+194,195,196,197,197,198,199,200,201,201,202,203,203,204,205,206,206,207,208,208,209,210,210,211,212,212,213,213,
+214,215,215,216,216,217,217,218,219,219,220,220,221,221,222,222,223,223,224,224,225,225,226,226,226,227,227,228,
+228,229,229,230,230,230,231,231,232,232,232,233,233,233,234,234,235,235,235,236,236,236,237,237,237,238,238,238,
+239,239,239,239,240,240,240,241,241,241,241,242,242,242,243,243,243,243,244,244,244,244,245,245,245,245,245,246,
+246,246,246,247,247,247,247,247,248,248,248,248,248,249,249,249,249,249,250,250,250,250,250,250,251,251,251,251,
+251,251,252,252,252,252,252,252,252,253,253,253,253,253,253,253,254,254,254,254,254,254,254,255,255,255,255};
+
+// reverse exponential table, for establishing where to re-start attack part of envelope
+const uint8_t revExpTable[] PROGMEM = {
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+0,0,0,0,0,0,0,0,0,0,1,1,2,2,3,3,3,4,4,5,5,6,6,7,7,8,8,8,9,9,10,10,11,11,12,12,13,13,14,14,15,15,16,16,17,17,18,
+18,19,19,20,21,21,22,22,23,23,24,24,25,26,26,27,27,28,28,29,30,30,31,31,32,33,33,34,35,35,36,37,37,38,39,39,40,
+41,41,42,43,43,44,45,45,46,47,48,48,49,50,51,51,52,53,54,55,55,56,57,58,59,60,60,61,62,63,64,65,66,67,68,69,70,
+70,71,72,73,74,75,77,78,79,80,81,82,83,84,85,86,88,89,90,91,92,94,95,96,98,99,100,102,103,105,106,108,109,111,
+112,114,115,117,119,120,122,124,126,128,130,132,134,136,138,140,142,144,147,149,152,154,157,160,162,165,168,171,
+175,178,181,185,189,193,197,201,206,211,216,221,227,234,241,248,255};
+
 uint8_t currentMidiNote; //the note currently being played
 uint8_t keysPressedArray[128] = {0}; //to keep track of which keys are pressed
 
@@ -59,6 +81,8 @@ uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 uint8_t ditherByte; // random dither
 uint8_t lfoPwmFrac; // fractional part of pwm
 uint8_t lfoPwmSet; // whole part of pwm
+uint8_t envPwmSet;
+uint8_t envCurrentLevel;
 bool triPhase = true; // rising or falling phase for triangle wave
 
 // LFO stuff
@@ -93,8 +117,10 @@ uint8_t envCnt;
 uint8_t lastEnvCnt;
 enum envStates {
   WAIT,
+  START_ATTACK,
   ATTACK,
   SUSTAIN,
+  START_RELEASE,
   RELEASE
 };
 envStates envState;
@@ -236,14 +262,20 @@ SIGNAL(TIMER1_OVF_vect) {
   }  
   LFO_PWM = lfoPwmSet;
   lastLfoCnt = lfoCnt;
-  // handle Envelope DDS - note this design uses linear envelope, not exponential
-  // AS3394 has a strange VCA, nothing happens at first.
-  // starting at 0x40000000 and ramping up gives a resonable response
+  // handle Envelope DDS - attack phase uses exponential control, release phase is linear
+  // This is the best way to control the '3394 VCA, to my ears anyway
   switch (envState) {
     case WAIT:
-      envPhaccu = 0x40000000; // start part-way
-      lastEnvCnt = 0x40;
+      envPhaccu = 0;
+      lastEnvCnt = 0;
+      envCurrentLevel = 0;
       ENV_PWM = 0;
+      break;
+    case START_ATTACK:
+      // use the reverse exp table to work out where we need to re-start the attack phase
+      envPhaccu = ((uint32_t) pgm_read_byte_near(revExpTable + envCurrentLevel)) << 24;
+      lastEnvCnt = 0;
+      envState = ATTACK;      
       break;
     case ATTACK:
       envPhaccu += envAttackTword; // increment phase accumulator
@@ -251,22 +283,30 @@ SIGNAL(TIMER1_OVF_vect) {
       if (envCnt < lastEnvCnt) {
         envState = SUSTAIN; // end of attack stage when counter wraps
       } else {
-        ENV_PWM = envCnt;
+        envCurrentLevel = pgm_read_byte_near(expTable + envCnt);
+        ENV_PWM = envCurrentLevel;
         lastEnvCnt = envCnt;
       }
       break;
     case SUSTAIN:
-      envPhaccu = 0xFFFFFFFF; // clear the accumulator
+      envPhaccu = 0xFFFFFFFF;
       lastEnvCnt = 0xFF;
-      ENV_PWM = 255;
+      envCurrentLevel = 255;
+      ENV_PWM = envCurrentLevel;
+      break;
+    case START_RELEASE:
+      envPhaccu = ((uint32_t) envCurrentLevel) << 24;
+      lastEnvCnt = 0xFF;
+      envState = RELEASE;
       break;
     case RELEASE:
       envPhaccu -= envReleaseTword; // decrement phase accumulator
       envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
-      if ((envCnt > lastEnvCnt) || (envCnt < 0x40)) {
+      if (envCnt > lastEnvCnt) {
         envState = WAIT; // end of release stage when counter wraps
       } else {
-        ENV_PWM = envCnt;
+        envCurrentLevel = envCnt; //linear decay
+        ENV_PWM = envCurrentLevel;
         lastEnvCnt = envCnt;
       }
       break;
@@ -297,7 +337,7 @@ void handleNoteOff(uint8_t channel, uint8_t pitch, uint8_t velocity)
       //there are no other keys pressed so proper note off
       synthNoteOff();
     }
-  }  
+  }
 }
 
 int findHighestKeyPressed(void) {
@@ -316,14 +356,16 @@ void synthNoteOn(uint8_t note) {
   //starts playback of a note
   setNotePitch(note); //set the oscillator pitch
   currentMidiNote = note; //store the current note
-  envState = ATTACK;
+  if (envState != ATTACK) {
+    envState = START_ATTACK;
+  }
   if ((lfoWaveform == ENV_UP) || (lfoWaveform == ENV_DOWN)) {
     lfoReset = true;
   }
 }
 
 void synthNoteOff(void) {
-  envState = RELEASE;
+  envState = START_RELEASE;
 }
 
 void setNotePitch(uint8_t note) {
@@ -387,10 +429,6 @@ void getLfoParams() {
 }
 
 void getEnvParams() {
-  float envControlVoltage;
-  // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
-  envControlVoltage = (1023 - analogRead(ENV_ATTACK_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
-  envAttackTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s  
-  envControlVoltage = (1023 - analogRead(ENV_RELEASE_PIN)) * float(13)/float(1024); //gives 13 octaves range 1ms to 10s
-  envReleaseTword = float(13690) * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+  envAttackTword = 4294967296 / ((float(analogRead(ENV_ATTACK_PIN)) * 305.474) + 31.25); //gives 1ms to 10 secs approx
+  envReleaseTword = 4294967296 / ((float(analogRead(ENV_RELEASE_PIN)) * 305.474) + 31.25); //gives 1ms to 10 secs approx
 }
