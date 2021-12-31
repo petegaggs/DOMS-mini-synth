@@ -47,6 +47,7 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define TEST_PIN 8 //PB0 test interrupt timing
 #define DAC_SCALE_PER_SEMITONE 42
 #define MIDI_BASE_NOTE 12 //C0
+#define PITCH_BEND_FACTOR 8 // how much to respond to pitch bend, the smaller this number, the more we respond
 
 //timer stuff
 #define LFO_PWM OCR1A
@@ -125,16 +126,19 @@ enum envStates {
 };
 envStates envState;
 
+int16_t midiNoteControl;
+int16_t midiPitchBendControl = 0;
+
 void setup() {
   //MIDI stuff
   MIDI.begin(MIDI_CHANNEL_OMNI);      
   MIDI.setHandleNoteOn(handleNoteOn);
   MIDI.setHandleNoteOff(handleNoteOff);
+  MIDI.setHandlePitchBend(handlePitchBend); 
   //SPI stuff
   pinMode (SPI_CS_PIN, OUTPUT);
   digitalWrite(SPI_CS_PIN, HIGH);
   SPI.begin(); 
-  setNotePitch(60); //middle C for test
   //set env high and LFO low for now
   pinMode(LFO_PWM_PIN, OUTPUT);
   digitalWrite(LFO_PWM_PIN, HIGH);
@@ -148,7 +152,6 @@ void setup() {
   pinMode(NOISE_PIN, OUTPUT);
   envState = WAIT;
   pinMode(TEST_PIN, OUTPUT);
-  //synthNoteOn(60); // for test
 }
 
 void loop() {
@@ -340,6 +343,16 @@ void handleNoteOff(uint8_t channel, uint8_t pitch, uint8_t velocity)
   }
 }
 
+void updateNotePitch() {
+  // update note pitch, taking into account midi note and midi pitchbend
+  dacWrite(midiNoteControl + midiPitchBendControl);
+}
+ 
+void handlePitchBend (byte channel, int bend) {
+  midiPitchBendControl = bend >> PITCH_BEND_FACTOR;
+  updateNotePitch();
+}
+
 int findHighestKeyPressed(void) {
   //search the array to find the highest key pressed. Return -1 if no keys are pressed
   int highestKeyPressed = -1; 
@@ -354,7 +367,8 @@ int findHighestKeyPressed(void) {
 
 void synthNoteOn(uint8_t note) {
   //starts playback of a note
-  setNotePitch(note); //set the oscillator pitch
+  midiNoteControl = (((int16_t) note) - MIDI_BASE_NOTE) * DAC_SCALE_PER_SEMITONE;
+  updateNotePitch();
   currentMidiNote = note; //store the current note
   if (envState != ATTACK) {
     envState = START_ATTACK;
@@ -366,11 +380,6 @@ void synthNoteOn(uint8_t note) {
 
 void synthNoteOff(void) {
   envState = START_RELEASE;
-}
-
-void setNotePitch(uint8_t note) {
-  //receive a midi note number and set the DAC voltage accordingly for the pitch CV
-  dacWrite((note - MIDI_BASE_NOTE) * DAC_SCALE_PER_SEMITONE);
 }
 
 void dacWrite(uint16_t value) {
