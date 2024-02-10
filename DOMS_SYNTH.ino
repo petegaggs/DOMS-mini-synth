@@ -5,6 +5,7 @@
  * AS3394E IC main voice
  * AS3340 2nd oscillator
  * LFO and envelope implemented with PWM
+ * duophonic - first oscillator plays highest note, 2nd oscillator plays lowest.
  * 
  * MIT License
  * Copyright (c) 2019 petegaggs
@@ -75,8 +76,9 @@ const uint8_t revExpTable[] PROGMEM = {
 112,114,115,117,119,120,122,124,126,128,130,132,134,136,138,140,142,144,147,149,152,154,157,160,162,165,168,171,
 175,178,181,185,189,193,197,201,206,211,216,221,227,234,241,248,255};
 
-uint8_t currentMidiNote; //the note currently being played
+uint8_t osc1_midi_note, osc2_midi_note; //the note currently being played
 uint8_t keysPressedArray[128] = {0}; //to keep track of which keys are pressed
+uint8_t key_pressed_count = 0;
 
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 uint8_t ditherByte; // random dither
@@ -126,7 +128,7 @@ enum envStates {
 };
 envStates envState;
 
-int16_t midiNoteControl;
+int16_t midi_osc1_control, midi_osc2_control;
 int16_t midiPitchBendControl = 0;
 
 void setup() {
@@ -321,31 +323,30 @@ SIGNAL(TIMER1_OVF_vect) {
 }
 
 void handleNoteOn(uint8_t channel, uint8_t pitch, uint8_t velocity) { 
-  // this function is called automatically when a note on message is received 
+  // this function is called automatically when a note on message is received
   keysPressedArray[pitch] = 1;
-  synthNoteOn(pitch);
+  key_pressed_count++;
+  osc1_midi_note = findHighestKeyPressed();
+  osc2_midi_note = findLowestKeyPressed();
+  synthNoteOn();
 }
 
-void handleNoteOff(uint8_t channel, uint8_t pitch, uint8_t velocity)
-{
-  keysPressedArray[pitch] = 0; //update the array holding the keys pressed 
-  if (pitch == currentMidiNote) {
-    //only act if the note released is the one currently playing, otherwise ignore it
-    int highestKeyPressed = findHighestKeyPressed(); //search the array to find the highest key pressed, will return -1 if no keys pressed
-    if (highestKeyPressed != -1) { 
-      //there is another key pressed somewhere, so the note off becomes a note on for the highest note pressed
-      synthNoteOn(highestKeyPressed);
-    }    
-    else  {
-      //there are no other keys pressed so proper note off
-      synthNoteOff();
-    }
+void handleNoteOff(uint8_t channel, uint8_t pitch, uint8_t velocity) {
+  keysPressedArray[pitch] = 0; //update the array holding the keys pressed
+  key_pressed_count--;
+  if (key_pressed_count == 0) {
+    synthNoteOff();
+  } else if (key_pressed_count > 1) {
+  osc1_midi_note = findHighestKeyPressed();
+  osc2_midi_note = findLowestKeyPressed();
+  synthNoteOn();
   }
 }
 
+
 void updateNotePitch() {
   // update note pitch, taking into account midi note and midi pitchbend
-  dacWrite(midiNoteControl + midiPitchBendControl);
+  dacWrite(midi_osc1_control + midiPitchBendControl, midi_osc2_control + midiPitchBendControl);
 }
  
 void handlePitchBend (byte channel, int bend) {
@@ -356,7 +357,7 @@ void handlePitchBend (byte channel, int bend) {
 int findHighestKeyPressed(void) {
   //search the array to find the highest key pressed. Return -1 if no keys are pressed
   int highestKeyPressed = -1; 
-  for (int count = 0; count < 127; count++) {
+  for (int count = 0; count < 128; count++) {
     //go through the array holding the keys pressed to find which is the highest (highest note has priority), and to find out if no keys are pressed
     if (keysPressedArray[count] == 1) {
       highestKeyPressed = count; //find the highest one
@@ -365,11 +366,24 @@ int findHighestKeyPressed(void) {
   return(highestKeyPressed);
 }
 
-void synthNoteOn(uint8_t note) {
+int findLowestKeyPressed(void) {
+  // search the array to find the lowest key pressed. Return -1 if no keys are pressed
+  int lowestKeyPressed = -1;
+  for (int count = 0; count < 128; count++) {
+    //go through the array holding the keys pressed to find which is the highest (highest note has priority), and to find out if no keys are pressed
+    if (keysPressedArray[count] == 1) {
+      lowestKeyPressed = count; //find the highest one
+      break;
+    }
+  }
+  return(lowestKeyPressed);
+}
+
+void synthNoteOn(void) {
   //starts playback of a note
-  midiNoteControl = (((int16_t) note) - MIDI_BASE_NOTE) * DAC_SCALE_PER_SEMITONE;
+  midi_osc1_control = (((int16_t) osc1_midi_note) - MIDI_BASE_NOTE) * DAC_SCALE_PER_SEMITONE;
+  midi_osc2_control = (((int16_t) osc2_midi_note) - MIDI_BASE_NOTE) * DAC_SCALE_PER_SEMITONE;
   updateNotePitch();
-  currentMidiNote = note; //store the current note
   if (envState != ATTACK) {
     envState = START_ATTACK;
   }
@@ -382,17 +396,17 @@ void synthNoteOff(void) {
   envState = START_RELEASE;
 }
 
-void dacWrite(uint16_t value) {
+void dacWrite(uint16_t value_a, uint16_t value_b) {
   // write to MCP4822 SPI DAC
   //send a value to DAC A (osc1)
   digitalWrite(SPI_CS_PIN, LOW);
-  SPI.transfer(0x10 | ((value >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
-  SPI.transfer(value & 0xFF); //bits 0..7 of 12 bit value
+  SPI.transfer(0x10 | ((value_a >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
+  SPI.transfer(value_a & 0xFF); //bits 0..7 of 12 bit value
   digitalWrite(SPI_CS_PIN, HIGH);
   //send same value to DAC B (osc2)
   digitalWrite(SPI_CS_PIN, LOW);
-  SPI.transfer(0x90 | ((value >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
-  SPI.transfer(value & 0xFF); //bits 0..7 of 12 bit value
+  SPI.transfer(0x90 | ((value_b >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
+  SPI.transfer(value_b & 0xFF); //bits 0..7 of 12 bit value
   digitalWrite(SPI_CS_PIN,HIGH);
 }
 
